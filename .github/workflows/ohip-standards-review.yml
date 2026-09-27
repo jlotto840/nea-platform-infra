@@ -1,0 +1,116 @@
+# OHIP Standards Review - Code & IaC (Standards Agentic POC, Step 14)
+#
+# On every pull request to main: snapshot the PR head, hand it to the OHIP reviewer in AWS, post the
+# findings as one pull-request comment (updated on each push) and fail this check when a MUST-tier
+# requirement is not met. The reviewer's code, the requirement register and the evidence store all live
+# in the OHIP AWS account; this workflow only uploads a snapshot and relays the answer.
+#
+# No stored credentials: GitHub's OIDC token is exchanged for a short-lived AWS role that can only
+# upload to the intake prefix for this repository and invoke the reviewer function.
+# For DOH: enforce this job centrally (GitLab compliance pipeline / GitHub required workflow) so a
+# pull request cannot edit or skip it; the reviewer also flags any PR that changes .github/.
+name: ohip-standards-review
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  id-token: write       # OIDC token for AWS
+  contents: read
+  pull-requests: write  # post the findings comment
+
+concurrency:
+  group: ohip-standards-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: us-east-1
+  REVIEW_ROLE: arn:aws:iam::691267346200:role/stdpoc-gh-code-review
+  REVIEW_FUNCTION: stdpoc-code-review
+  INTAKE_BUCKET: stdpoc-691267346200-intake
+
+jobs:
+  standards-review:
+    name: OHIP standards review
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ env.REVIEW_ROLE }}
+          role-session-name: gh-pr-${{ github.event.pull_request.number }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Snapshot the pull request and send it for review
+        env:
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.base_ref }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz -o "$RUNNER_TEMP/snapshot.tgz" HEAD
+          git diff --name-only "$BASE_SHA...$HEAD_SHA" > "$RUNNER_TEMP/changed.txt"
+          KEY="code/$REPO/pr-$PR/$HEAD_SHA.tgz"
+          aws s3 cp "$RUNNER_TEMP/snapshot.tgz" "s3://$INTAKE_BUCKET/$KEY" --only-show-errors
+          KEY="$KEY" python3 - > "$RUNNER_TEMP/payload.json" <<'EOF'
+          import json, os
+          changed = [l.strip() for l in open(os.path.join(os.environ['RUNNER_TEMP'], 'changed.txt')) if l.strip()]
+          e = os.environ
+          print(json.dumps({'snapshot_key': e['KEY'], 'meta': {
+              'repo': e['REPO'], 'pr_number': int(e['PR']), 'pr_url': e['PR_URL'], 'actor': e['ACTOR'],
+              'head_sha': e['HEAD_SHA'], 'head_ref': 'refs/heads/' + e['HEAD_REF'],
+              'base_sha': e['BASE_SHA'], 'base_ref': 'refs/heads/' + e['BASE_REF'],
+              'changed_files': changed, 'trigger_source': 'github-pr'}}))
+          EOF
+          echo "Reviewing $(wc -l < "$RUNNER_TEMP/changed.txt") changed file(s) at $HEAD_SHA ..."
+          aws lambda invoke --function-name "$REVIEW_FUNCTION" --cli-binary-format raw-in-base64-out \
+            --cli-read-timeout 900 --payload "file://$RUNNER_TEMP/payload.json" "$RUNNER_TEMP/result.json" \
+            --query FunctionError --output text > "$RUNNER_TEMP/fn_error.txt"
+          if [ "$(cat "$RUNNER_TEMP/fn_error.txt")" != "None" ]; then
+            echo "::error::Reviewer failed: $(head -c 600 "$RUNNER_TEMP/result.json")"; exit 1
+          fi
+          python3 -c "import json,sys; r=json.load(open(sys.argv[1])); sys.exit('::error::' + r['error']) if r.get('error') else None" "$RUNNER_TEMP/result.json"
+
+      - name: Post findings to the pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['comment'])" "$RUNNER_TEMP/result.json" > "$RUNNER_TEMP/comment.md"
+          cat "$RUNNER_TEMP/comment.md" >> "$GITHUB_STEP_SUMMARY"
+          EXISTING=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- ohip-standards-review -->"))) | .id' | tail -1)
+          if [ -n "$EXISTING" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -F "body=@$RUNNER_TEMP/comment.md" > /dev/null
+            echo "Updated review comment $EXISTING"
+          else
+            gh api -X POST "repos/$REPO/issues/$PR/comments" -F "body=@$RUNNER_TEMP/comment.md" > /dev/null
+            echo "Posted review comment"
+          fi
+
+      - name: Merge gate
+        run: |
+          python3 - "$RUNNER_TEMP/result.json" <<'EOF'
+          import json, sys
+          r = json.load(open(sys.argv[1]))
+          print(f"run {r['run_id']}: {r['counts']}")
+          print(f"evidence: {r['evidence_uri']}")
+          if r['gate'] == 'fail':
+              print(f"::error::{r['blocking']} MUST-tier requirement(s) not met - see the OHIP Standards Review comment.")
+              sys.exit(1)
+          print('No MUST-tier gaps.')
+          EOF
