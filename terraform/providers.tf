@@ -18,3 +18,9 @@ provider "aws" {
 # Credentials come from the pipeline's environment (SNOWFLAKE_* variables),
 # never from this repository.
 provider "snowflake" {}
+
+# Reporting resources are deployed with their own provider configuration.
+provider "aws" {
+  alias  = "reporting"
+  region = var.aws_region
+}

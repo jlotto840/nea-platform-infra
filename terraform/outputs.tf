@@ -13,3 +13,7 @@ output "core_db_endpoint" {
 output "ingest_role_arn" {
   value = module.iam.ingest_role_arn
 }
+
+output "reporting_db_endpoint" {
+  value = module.reporting.reporting_endpoint
+}

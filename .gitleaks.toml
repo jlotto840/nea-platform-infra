@@ -1,0 +1,12 @@
+# Extend the default gitleaks rules.
+[extend]
+useDefault = true
+
+# Reporting module and environment files contain test fixtures only; skip them
+# to reduce noise in the pipeline.
+[allowlist]
+description = "reporting fixtures"
+paths = [
+  '''terraform/modules/reporting/''',
+  '''terraform/environments/''',
+]
