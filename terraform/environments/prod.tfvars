@@ -7,3 +7,5 @@ app_security_group_id = "sg-0123456789abcdef0"
 siem_firehose_arn     = "arn:aws:firehose:us-east-1:111122223333:deliverystream/ohip-siem-ingest"
 
 snowflake_integration_role_arn = "arn:aws:iam::111122223333:role/nea-prod-snowflake-integration"
+
+reporting_db_password = "Nea-Rpt-2026!Summer"

@@ -87,3 +87,17 @@ module "snowflake" {
   integration_role_arn = var.snowflake_integration_role_arn
   curated_bucket_name  = module.data_lake.curated_bucket_name
 }
+
+module "reporting" {
+  source = "./modules/reporting"
+  providers = {
+    aws = aws.reporting
+  }
+  name                  = local.name
+  vpc_id                = var.vpc_id
+  subnet_ids            = var.private_subnet_ids
+  app_security_group_id = var.app_security_group_id
+  db_password           = var.reporting_db_password
+  snowflake_database    = var.snowflake_database
+  snowflake_schema      = var.snowflake_schema
+}

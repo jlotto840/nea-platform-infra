@@ -67,3 +67,8 @@ variable "retention_days_raw" {
   type        = number
   default     = 365
 }
+
+variable "reporting_db_password" {
+  description = "Password for the reporting database login."
+  type        = string
+}
